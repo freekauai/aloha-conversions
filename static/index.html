@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Image to DST</title>
+<style>
+  :root {
+    --bg: #f4f3f0; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #deddd8;
+    --accent: #2f5bd3; --accent-ink: #fff; --warn-bg: #fff4d6; --warn-ink: #6b4b00;
+    --err-bg: #fde8e6; --err-ink: #8a1c12; --stage: #222428;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151618; --panel: #1f2023; --ink: #ececee; --muted: #9a9aa2; --line: #313238;
+      --accent: #6d8ff0; --accent-ink: #0d0f14; --warn-bg: #3a3017; --warn-ink: #f3d489;
+      --err-bg: #3d1d1a; --err-ink: #ffb4aa; --stage: #111214;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 20px 16px 4px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; display: grid; gap: 16px;
+         grid-template-columns: minmax(0, 360px) minmax(0, 1fr); align-items: start; }
+  @media (max-width: 800px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .field { margin-bottom: 18px; }
+  .field:last-child { margin-bottom: 0; }
+  .label { display: flex; justify-content: space-between; font-weight: 600; font-size: 13px;
+           margin-bottom: 6px; }
+  .label output { font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  .drop { display: flex; align-items: center; gap: 12px; border: 1.5px dashed var(--line);
+          border-radius: 10px; padding: 12px; cursor: pointer; min-height: 72px; }
+  .drop.over { border-color: var(--accent); }
+  .drop img { width: 56px; height: 56px; object-fit: contain; border-radius: 6px;
+              background: repeating-conic-gradient(#8883 0 25%, transparent 0 50%) 0 0 / 12px 12px; }
+  .drop .name { font-weight: 600; word-break: break-all; }
+  .drop input { display: none; }
+
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 9px; padding: 3px; gap: 3px; }
+  .seg label { flex: 1; text-align: center; padding: 7px 4px; border-radius: 7px; cursor: pointer;
+               font-size: 13px; user-select: none; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg label:has(input:checked) { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .seg label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .sub { margin-top: 8px; }
+  select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+           background: var(--panel); color: var(--ink); font: inherit; }
+  input[type=number] { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+                       background: transparent; color: var(--ink); font: inherit; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+  .check input { width: 18px; height: 18px; accent-color: var(--accent); }
+
+  .switch { position: relative; width: 44px; height: 26px; flex: none; }
+  .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; position: relative; z-index: 1; }
+  .switch span { position: absolute; inset: 0; border-radius: 13px; background: var(--line); transition: .15s; }
+  .switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+                        border-radius: 50%; background: #fff; transition: .15s; box-shadow: 0 1px 2px #0004; }
+  .switch input:checked + span { background: var(--accent); }
+  .switch input:checked + span::after { transform: translateX(18px); }
+  .switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .colors { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .swatch { width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--line); cursor: pointer; padding: 0; }
+  .swatch[aria-pressed=true] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--panel) inset; }
+  input[type=color] { width: 40px; height: 32px; border: 1px solid var(--line); border-radius: 8px;
+                      background: transparent; padding: 2px; cursor: pointer; }
+
+  button.primary { width: 100%; padding: 12px; border: 0; border-radius: 10px; background: var(--accent);
+                   color: var(--accent-ink); font: 600 15px system-ui, sans-serif; cursor: pointer; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+
+  .stage { background: var(--stage); border-radius: 10px; min-height: 260px; display: grid;
+           place-items: center; overflow: hidden; }
+  .stage img { max-width: 100%; max-height: 70vh; display: block; }
+  .stage .empty { color: #8a8b90; padding: 24px; text-align: center; }
+  .spinner { width: 28px; height: 28px; border: 3px solid #fff3; border-top-color: #fff; border-radius: 50%;
+             animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 14px 0; }
+  .stat { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  .msg { border-radius: 10px; padding: 10px 12px; margin-top: 12px; font-size: 14px; }
+  .msg.warn { background: var(--warn-bg); color: var(--warn-ink); }
+  .msg.err { background: var(--err-bg); color: var(--err-ink); }
+  .downloads { display: flex; gap: 10px; flex-wrap: wrap; }
+  .downloads a { flex: 1; min-width: 140px; text-align: center; padding: 11px; border-radius: 10px;
+                 text-decoration: none; font-weight: 600; border: 1px solid var(--line); color: var(--ink); }
+  .downloads a.main { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .blocks { display: grid; gap: 6px; margin-top: 8px; }
+  .block { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; }
+  .block .det { width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--line); flex: none; }
+  .block .meta { flex: 1; font-size: 12px; color: var(--muted); line-height: 1.3; }
+  .block .meta b { color: var(--ink); font-size: 12px; }
+  .block.skip { opacity: .55; }
+  .legend { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 12px; font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 5px; vertical-align: -2px; border: 1px solid var(--line); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Image to DST</h1>
+  <p>Turn a logo or lettering into a machine embroidery file.</p>
+</header>
+
+<main>
+  <form class="panel" id="form">
+    <div class="field">
+      <div class="label">Image</div>
+      <label class="drop" id="drop">
+        <img id="thumb" alt="" hidden>
+        <div>
+          <div class="name" id="fileName">Choose a PNG or JPG</div>
+          <div class="hint">Max 10 MB, 4000 × 4000 px. High-contrast art works best.</div>
+        </div>
+        <input type="file" id="file" name="file" accept="image/png,image/jpeg">
+      </label>
+    </div>
+
+    <div class="field">
+      <div class="label">Size</div>
+      <select id="preset" name="preset" aria-label="Size preset"></select>
+      <div class="hint" id="presetHint"></div>
+      <div class="sub" id="customBox" hidden>
+        <div class="row">
+          <input type="number" name="width_in" id="widthIn" min="0.5" max="14" step="0.05" value="4"
+                 aria-label="Custom width in inches" inputmode="decimal" placeholder="Width in">
+          <input type="number" name="height_in" id="heightIn" min="0.5" max="14" step="0.05"
+                 aria-label="Custom max height in inches" inputmode="decimal" placeholder="Max height in">
+        </div>
+        <div class="hint">Width and optional max height, in inches (0.5–14)</div>
+      </div>
+    </div>
+
+    <div class="field">
+      <div class="label">Stitch mode</div>
+      <div class="seg" role="radiogroup" aria-label="Stitch mode">
+        <label><input type="radio" name="mode" value="fill" checked>Fill</label>
+        <label><input type="radio" name="mode" value="outline">Outline only</label>
+      </div>
+      <label class="check sub" id="tripleBox" hidden>
+        <input type="checkbox" name="triple_run" id="triple"> Triple run (bolder outline)
+      </label>
+    </div>
+
+    <div class="field">
+      <div class="label">Colors</div>
+      <div class="seg" role="radiogroup" aria-label="Number of thread colors" id="colorCount">
+        <label><input type="radio" name="colors" value="1" checked>1</label>
+        <label><input type="radio" name="colors" value="2">2</label>
+        <label><input type="radio" name="colors" value="3">3</label>
+        <label><input type="radio" name="colors" value="4">4</label>
+        <label><input type="radio" name="colors" value="5">5</label>
+        <label><input type="radio" name="colors" value="6">6</label>
+      </div>
+      <div class="hint" id="colorHint">One thread: light parts stitch; use Invert for dark art on a light background.</div>
+      <div class="sub" id="multi" hidden>
+        <div class="hint">Detected colors, sewn biggest first. Pick the thread for each.</div>
+        <div class="blocks" id="blocks"></div>
+      </div>
+    </div>
+
+    <div class="field row" id="single">
+      <div>
+        <div class="label" style="margin:0">Invert</div>
+        <div class="hint" style="margin:0">Stitch the dark parts instead of the light parts</div>
+      </div>
+      <label class="switch"><input type="checkbox" name="invert" id="invert" aria-label="Invert"><span></span></label>
+    </div>
+
+    <div class="field">
+      <div class="label"><span>Letter spacing</span><output id="spacingOut">1.3 mm</output></div>
+      <input type="range" name="spacing_mm" id="spacing" min="0" max="3" step="0.1" value="1.3">
+    </div>
+
+    <div class="field" id="singleThread">
+      <div class="label">Thread color</div>
+      <div class="colors" id="colors">
+        <input type="color" id="color" value="#ffffff" aria-label="Custom thread color">
+      </div>
+    </div>
+
+    <div class="field">
+      <button class="primary" id="go" type="submit" disabled>Generate</button>
+    </div>
+  </form>
+
+  <section class="panel" aria-live="polite">
+    <div class="stage" id="stage"><div class="empty">Your stitch preview will appear here.</div></div>
+    <div id="results" hidden>
+      <div class="stats" id="stats"></div>
+      <div class="legend" id="legend" hidden></div>
+      <div class="downloads">
+        <a class="main" id="dstLink" href="#">Download .dst</a>
+        <a id="pngLink" href="#">Download preview .png</a>
+      </div>
+      <div class="hint" style="margin-top:8px">Nothing is stored on the server: the files come straight back to your browser.</div>
+    </div>
+    <div id="messages"></div>
+  </section>
+</main>
+
+<script>
+const MAX_BYTES = 10 * 1024 * 1024;
+const SWATCHES = ["#ffffff", "#111111", "#c8102e", "#003da5", "#ffc72c", "#00843d", "#8a8d8f"];
+const $ = (id) => document.getElementById(id);
+const form = $("form"), fileInput = $("file"), drop = $("drop"), go = $("go");
+let file = null, lastUrls = [];
+
+// Size presets come from the server so the two stay in sync.
+const presetSel = $("preset");
+function inches(v) { return v % 1 ? v.toFixed(2).replace(/0$/, "") : String(v); }
+let presets = [];
+async function loadPresets() {
+  const d = await (await fetch("/api/presets")).json();
+  presets = d.presets;
+  presetSel.replaceChildren(...presets.map((p) => new Option(`${p.label} — ${inches(p.width_in)} × ${inches(p.max_height_in)} in`, p.id)),
+                            new Option("Custom…", "custom"));
+  presetSel.value = "hat";
+  syncPreset();
+}
+function syncPreset() {
+  const p = presets.find((x) => x.id === presetSel.value);
+  $("customBox").hidden = presetSel.value !== "custom";
+  $("presetHint").textContent = p ? p.hint : "";
+}
+presetSel.onchange = syncPreset;
+loadPresets().catch(() => showError("Could not load size presets. Reload the page."));
+
+// Thread swatches
+const colorInput = $("color");
+for (const hex of SWATCHES) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "swatch"; b.style.background = hex; b.dataset.hex = hex;
+  b.setAttribute("aria-label", "Thread " + hex);
+  b.onclick = () => { colorInput.value = hex; syncSwatches(); };
+  $("colors").insertBefore(b, colorInput);
+}
+function syncSwatches() {
+  for (const b of document.querySelectorAll(".swatch"))
+    b.setAttribute("aria-pressed", b.dataset.hex === colorInput.value.toLowerCase());
+}
+colorInput.oninput = syncSwatches; syncSwatches();
+
+// File selection (click or drag and drop)
+// The engine may run as a serverless function with a ~4 MB request limit, and
+// stitching never needs more than ~2000 px anyway, so big uploads are
+// re-encoded in the browser first.
+const SHRINK_OVER_BYTES = 3 * 1024 * 1024, SHRINK_TO_PX = 2000;
+async function shrinkIfNeeded(f) {
+  if (f.size <= SHRINK_OVER_BYTES) return f;
+  const bmp = await createImageBitmap(f);
+  const k = Math.min(1, SHRINK_TO_PX / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  const blob = await new Promise((r) => c.toBlob(r, "image/png"));
+  return new File([blob], f.name.replace(/\.[^.]+$/, "") + ".png", { type: "image/png" });
+}
+async function setFile(f) {
+  clearMessages();
+  if (!f) return;
+  if (!/^image\/(png|jpeg)$/.test(f.type)) return showError("Please choose a PNG or JPG image.");
+  if (f.size > MAX_BYTES) return showError("That file is larger than 10 MB.");
+  try { f = await shrinkIfNeeded(f); } catch { return showError("That image could not be read."); }
+  file = f;
+  $("fileName").textContent = f.name;
+  const thumb = $("thumb");
+  thumb.src = URL.createObjectURL(f); thumb.hidden = false;
+  go.disabled = false;
+  if (colorCount() > 1) detectColors();
+}
+fileInput.onchange = () => setFile(fileInput.files[0]);
+
+// Multi-color: ask the server which colors it sees, then pick a thread for
+// each. The digitize call reproduces the same blocks.
+let blocks = [], blocksFor = "";
+function colorCount() { return Number(form.colors.value); }
+function syncColorMode() {
+  const n = colorCount();
+  $("single").hidden = n > 1; $("singleThread").hidden = n > 1; $("multi").hidden = n === 1;
+  $("colorHint").textContent = n === 1
+    ? "One thread: light parts stitch; use Invert for dark art on a light background."
+    : `Split into ${n} colors, one thread each. The background color is skipped unless you switch it on.`;
+  if (n > 1 && file) detectColors();
+}
+async function detectColors() {
+  const n = colorCount(), key = file.name + file.size + ":" + n;
+  if (blocksFor === key) return;
+  $("blocks").innerHTML = '<div class="hint">Looking at the colors…</div>';
+  const body = new FormData(); body.append("file", file); body.append("colors", n);
+  try {
+    const res = await fetch("/api/colors", { method: "POST", body });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `Server error (${res.status}).`);
+    blocks = data.blocks.map((b) => ({ ...b, thread: b.hex, stitch: !b.is_background }));
+    blocksFor = key;
+    renderBlocks();
+  } catch (err) {
+    $("blocks").innerHTML = ""; showError(err.message);
+  }
+}
+function renderBlocks() {
+  const box = $("blocks"); box.innerHTML = "";
+  blocks.forEach((b, i) => {
+    const d = document.createElement("div");
+    d.className = "block" + (b.stitch ? "" : " skip");
+    d.innerHTML = '<span class="det"></span><input type="color" aria-label="Thread color">' +
+      '<div class="meta"><b></b><br><span class="pct"></span></div>' +
+      '<label class="switch" title="Stitch the background"><input type="checkbox"><span></span></label>';
+    d.querySelector(".det").style.background = b.hex;
+    const inp = d.querySelector("input[type=color]"); inp.value = b.thread;
+    inp.oninput = () => { b.thread = inp.value; };
+    d.querySelector("b").textContent = (b.is_background ? "Background " : "Color ") + (i + 1);
+    d.querySelector(".pct").textContent = b.area_pct + "% of the image" +
+      (b.is_background ? (b.stitch ? " · stitching it" : " · skipped") : "");
+    // Only the background can be left out; every other color is part of the art.
+    const sw = d.querySelector(".switch"), cb = sw.querySelector("input");
+    sw.hidden = !b.is_background;
+    cb.checked = b.stitch; cb.setAttribute("aria-label", "Stitch the background color");
+    cb.onchange = () => { b.stitch = cb.checked; renderBlocks(); };
+    box.appendChild(d);
+  });
+}
+$("colorCount").addEventListener("change", syncColorMode);
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); setFile(e.dataTransfer.files[0]); };
+
+// Option visibility
+form.addEventListener("change", () => {
+  $("tripleBox").hidden = form.mode.value !== "outline";
+});
+const spacing = $("spacing");
+spacing.oninput = () => $("spacingOut").textContent = Number(spacing.value).toFixed(1) + " mm";
+
+// Messages
+function clearMessages() { $("messages").innerHTML = ""; }
+function addMessage(kind, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + kind; d.textContent = text;
+  $("messages").appendChild(d);
+}
+function showError(text) { clearMessages(); addMessage("err", text); }
+
+function stat(value, label) {
+  const d = document.createElement("div");
+  d.className = "stat";
+  d.innerHTML = "<b></b><span></span>";
+  d.querySelector("b").textContent = value;
+  d.querySelector("span").textContent = label;
+  return d;
+}
+function formatMinutes(m) {
+  if (m < 1) return Math.max(1, Math.round(m * 60)) + " sec";
+  const whole = Math.floor(m), sec = Math.round((m - whole) * 60);
+  return sec ? `${whole} min ${sec} s` : `${whole} min`;
+}
+
+// Generate
+form.onsubmit = async (e) => {
+  e.preventDefault();
+  if (!file) return;
+  clearMessages();
+  const body = new FormData();
+  body.append("file", file);
+  body.append("preset", presetSel.value);
+  if (presetSel.value === "custom") {
+    body.append("width_in", $("widthIn").value);
+    if ($("heightIn").value) body.append("height_in", $("heightIn").value);
+  }
+  body.append("mode", form.mode.value);
+  body.append("invert", $("invert").checked);
+  body.append("triple_run", $("triple").checked);
+  body.append("spacing_mm", spacing.value);
+  body.append("color", colorInput.value);
+  const n = colorCount();
+  body.append("colors", n);
+  if (n > 1) {
+    if (!blocks.length) return showError("Still detecting colors. Try again in a second.");
+    const bg = blocks.find((b) => b.is_background);
+    body.append("stitch_background", !!(bg && bg.stitch));
+    body.append("thread_colors", JSON.stringify(blocks.filter((b) => b.stitch).map((b) => b.thread)));
+  }
+
+  go.disabled = true; go.textContent = "Digitizing…";
+  $("results").hidden = true;
+  $("stage").innerHTML = '<div class="spinner" role="status" aria-label="Digitizing"></div>';
+  try {
+    const res = await fetch("/api/digitize", { method: "POST", body });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = Array.isArray(data.detail) ? data.detail.map((d) => d.msg).join("; ") : data.detail;
+      throw new Error(detail || `Server error (${res.status}).`);
+    }
+    // The engine returns the files inline; turn them into local blob URLs so
+    // the download links work like ordinary files.
+    const toBlobUrl = (b64, type) => {
+      const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+      return URL.createObjectURL(new Blob([bytes], { type }));
+    };
+    for (const u of lastUrls) URL.revokeObjectURL(u);
+    lastUrls = [toBlobUrl(data.dst_base64, "application/octet-stream"), toBlobUrl(data.preview_png_base64, "image/png")];
+    const img = new Image();
+    img.alt = "Stitch preview";
+    img.src = lastUrls[1];
+    await img.decode().catch(() => {});
+    $("stage").replaceChildren(img);
+
+    const s = data.stats;
+    $("stats").replaceChildren(
+      stat(`${s.width_in}″ × ${s.height_in}″`, "Final size"),
+      stat(`${s.width_mm} × ${s.height_mm} mm`, "Final size (mm)"),
+      stat(s.stitches.toLocaleString(), "Stitches"),
+      stat(s.trims.toLocaleString(), "Trims"),
+      stat(formatMinutes(s.sew_minutes), "Sew time at 700 spm"),
+    );
+    if (s.color_changes) $("stats").appendChild(stat(String(s.color_changes), "Thread changes"));
+    const legend = $("legend"); legend.innerHTML = ""; legend.hidden = data.blocks.length < 2;
+    data.blocks.forEach((b, i) => {
+      const sp = document.createElement("span");
+      sp.innerHTML = "<i></i>"; sp.querySelector("i").style.background = b.thread;
+      sp.append(`${i + 1}. ${b.thread.toUpperCase()} · ${b.stitches.toLocaleString()} stitches`);
+      legend.appendChild(sp);
+    });
+    $("dstLink").href = lastUrls[0]; $("dstLink").download = data.filename + ".dst";
+    $("pngLink").href = lastUrls[1]; $("pngLink").download = data.filename + "-preview.png";
+    $("results").hidden = false;
+    for (const w of data.warnings) addMessage("warn", w);
+  } catch (err) {
+    $("stage").innerHTML = '<div class="empty">No preview.</div>';
+    showError(err.message);
+  } finally {
+    go.disabled = false; go.textContent = "Generate";
+  }
+};
+</script>
+</body>
+</html>

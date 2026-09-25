@@ -1,0 +1,152 @@
+import base64
+import json
+
+import cv2
+import numpy as np
+import pytest
+from fastapi.testclient import TestClient
+
+from backend import main
+
+
+@pytest.fixture
+def client():
+    main._hits.clear()  # the limiter is process-wide; each test starts fresh
+    with TestClient(main.app) as c:
+        yield c
+
+
+def png_bytes(img):
+    ok, buf = cv2.imencode(".png", img)
+    assert ok
+    return buf.tobytes()
+
+
+def text_png():
+    img = np.zeros((200, 700), np.uint8)
+    cv2.putText(img, "SURF", (20, 160), cv2.FONT_HERSHEY_DUPLEX, 5, 255, 20)
+    return png_bytes(img)
+
+
+def test_index_served(client):
+    r = client.get("/")
+    assert r.status_code == 200 and "Image to DST" in r.text
+
+
+def test_digitize_returns_files_inline(client):
+    r = client.post("/api/digitize", files={"file": ("my logo.png", text_png(), "image/png")},
+                    data={"preset": "hat", "color": "#ff0000"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert abs(body["stats"]["width_in"] - 4.25) <= 0.02
+    assert body["stats"]["stitches"] > 0 and body["stats"]["trims"] >= 1
+    assert body["filename"] == "my-logo"
+
+    dst = base64.b64decode(body["dst_base64"])
+    assert len(dst) > 512 and dst.startswith(b"LA:")  # 512-byte DST header
+    png = base64.b64decode(body["preview_png_base64"])
+    assert png[:4] == b"\x89PNG"
+
+
+def test_custom_width(client):
+    r = client.post("/api/digitize", files={"file": ("a.png", text_png(), "image/png")},
+                    data={"preset": "custom", "width_in": "2"})
+    assert r.status_code == 200, r.text
+    assert abs(r.json()["stats"]["width_in"] - 2) <= 0.02
+
+
+def test_rejects_non_images(client):
+    r = client.post("/api/digitize", files={"file": ("a.gif", b"GIF89a....", "image/gif")})
+    assert r.status_code == 415
+
+
+def test_upload_limit_is_configurable(monkeypatch, client):
+    monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 100)
+    r = client.post("/api/digitize", files={"file": ("a.png", text_png(), "image/png")})
+    assert r.status_code == 413
+
+
+def test_rejects_oversized_dimensions(client):
+    big = png_bytes(np.zeros((10, 4001), np.uint8))
+    r = client.post("/api/digitize", files={"file": ("a.png", big, "image/png")})
+    assert r.status_code == 413
+
+
+def test_jpeg_dimensions_are_read_from_header():
+    ok, buf = cv2.imencode(".jpg", np.zeros((123, 456, 3), np.uint8))
+    assert main.image_dimensions(buf.tobytes()) == (456, 123)
+
+
+def test_blank_image_gives_helpful_error(client):
+    r = client.post("/api/digitize", files={"file": ("a.png", png_bytes(np.zeros((50, 50), np.uint8)), "image/png")})
+    assert r.status_code == 422 and "Invert" in r.json()["detail"]
+
+
+def test_presets_endpoint_lists_every_preset(client):
+    body = client.get("/api/presets").json()
+    assert {p["id"] for p in body["presets"]} == set(main.dz.PRESETS)
+    assert body["custom"]["max_width_in"] == main.MAX_WIDTH_IN
+
+
+def test_cors_allows_kauaitoday(client):
+    r = client.options("/api/digitize", headers={"Origin": "https://kauaitoday.info",
+                                                 "Access-Control-Request-Method": "POST"})
+    assert r.headers.get("access-control-allow-origin") == "https://kauaitoday.info"
+
+
+def color_png():
+    img = np.full((300, 800, 3), 255, np.uint8)
+    cv2.circle(img, (200, 150), 110, (30, 60, 200), -1)
+    cv2.rectangle(img, (400, 40), (760, 260), (180, 80, 0), -1)
+    return png_bytes(img)
+
+
+def test_colors_endpoint_and_multicolor_digitize(client):
+    r = client.post("/api/colors", files={"file": ("a.png", color_png(), "image/png")}, data={"colors": "3"})
+    assert r.status_code == 200, r.text
+    blocks = r.json()["blocks"]
+    assert len(blocks) == 3 and blocks[0]["is_background"]
+
+    threads = json.dumps(["#123456", "#abcdef"])
+    r = client.post("/api/digitize", files={"file": ("a.png", color_png(), "image/png")},
+                    data={"preset": "left_chest", "colors": "3", "thread_colors": threads})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["stats"]["color_changes"] == 1
+    assert [b["thread"] for b in body["blocks"]] == ["#123456", "#abcdef"]
+    assert all(b["stitches"] > 0 for b in body["blocks"])
+
+
+def test_bad_thread_colors_rejected(client):
+    r = client.post("/api/digitize", files={"file": ("a.png", color_png(), "image/png")},
+                    data={"colors": "3", "thread_colors": '["red"]'})
+    assert r.status_code == 422
+    r = client.post("/api/digitize", files={"file": ("a.png", color_png(), "image/png")},
+                    data={"colors": "9"})
+    assert r.status_code == 422
+
+
+def test_rate_limit_blocks_after_the_window_fills(client, monkeypatch):
+    monkeypatch.setattr(main, "RATE_LIMIT", 3)
+    main._hits.clear()
+    headers = {"x-forwarded-for": "203.0.113.9, 10.0.0.1"}
+    for _ in range(3):
+        r = client.post("/api/colors", files={"file": ("a.png", color_png(), "image/png")},
+                        data={"colors": "2"}, headers=headers)
+        assert r.status_code == 200
+    r = client.post("/api/colors", files={"file": ("a.png", color_png(), "image/png")},
+                    data={"colors": "2"}, headers=headers)
+    assert r.status_code == 429 and "Retry-After" in r.headers
+    # A different IP is unaffected, and GETs are never limited.
+    r = client.post("/api/colors", files={"file": ("a.png", color_png(), "image/png")},
+                    data={"colors": "2"}, headers={"x-forwarded-for": "198.51.100.4"})
+    assert r.status_code == 200
+    assert client.get("/api/presets", headers=headers).status_code == 200
+
+
+def test_rate_limit_window_slides():
+    main._hits.clear()
+    for t in range(main.RATE_LIMIT):
+        assert main.rate_limited("1.2.3.4", now=1000 + t) == 0
+    assert main.rate_limited("1.2.3.4", now=1000 + main.RATE_LIMIT) > 0
+    assert main.rate_limited("1.2.3.4", now=1000 + main.RATE_WINDOW_SECONDS + 1) == 0
