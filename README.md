@@ -120,6 +120,15 @@ On `POST /api/digitize`:
 `GET /api/threads` returns real thread charts (Brother and Janome, from the tables
 pyembroidery ships) and the digitize response lists the nearest chart thread per block.
 
+## Usage stats
+
+If `STATS_SECRET` is set, every conversion and digitizing failure is reported
+server-side to `STATS_URL` (default `https://kauaitoday.info/api/submit`) as a
+`kind: aloha` event with the secret in `x-aloha-secret`. The site rolls them up for
+its admin dashboard. Counts only: placement, fabric, color count, stitches, formats.
+The digitize response's `stats_recorded` says whether the report succeeded; a failure
+never affects the conversion. Unset the variable to turn it off.
+
 ## Rate limit
 
 `POST /api/digitize` and `/api/colors` are limited per client IP to `RATE_LIMIT`

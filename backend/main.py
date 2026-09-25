@@ -9,6 +9,7 @@ import re
 import struct
 import tempfile
 import time
+import urllib.request
 from collections import deque
 from pathlib import Path
 
@@ -40,6 +41,29 @@ RATE_LIMIT = int(os.environ.get("RATE_LIMIT", "30"))
 RATE_WINDOW_SECONDS = int(os.environ.get("RATE_WINDOW_SECONDS", "600"))
 RATE_LIMITED_PATHS = {"/api/digitize", "/api/colors"}
 _hits: dict[str, deque[float]] = {}
+
+# Usage stats go to the kauaitoday.info admin dashboard, server-side so they
+# can't be spoofed or ad-blocked. Counts only: placement, fabric, colors,
+# stitches. Off unless STATS_SECRET is set (it's shared with the site's
+# api/submit.js). Best-effort: a failure never affects the conversion.
+STATS_URL = os.environ.get("STATS_URL", "https://kauaitoday.info/api/submit")
+STATS_SECRET = os.environ.get("STATS_SECRET", "")
+STATS_TIMEOUT = 4
+
+
+def report_stats(event: str, **fields) -> bool:
+    if not STATS_SECRET:
+        return False
+    body = json.dumps({"kind": "aloha", "event": event, **fields}).encode()
+    req = urllib.request.Request(STATS_URL, data=body, method="POST", headers={
+        "Content-Type": "application/json", "x-aloha-secret": STATS_SECRET,
+        "User-Agent": "AlohaConversions/1.0 (+https://kauaitoday.info/aloha-conversions)"})
+    try:
+        with urllib.request.urlopen(req, timeout=STATS_TIMEOUT) as r:
+            return r.status == 200 and json.loads(r.read() or b"{}").get("ok") is True
+    except Exception as e:  # network, 4xx/5xx, bot challenge: log and move on
+        print(f"[stats] {event} not recorded: {e}")
+        return False
 
 
 def client_ip(request: Request) -> str:
@@ -271,14 +295,18 @@ def digitize(
         try:
             result = dz.digitize_to_files(image, opts, Path(tmp), color, wanted or ("dst",))
         except dz.DigitizeError as e:
+            report_stats("error", preset=preset, fabric=fabric or "")
             raise HTTPException(422, str(e))
         dst_b64 = base64.b64encode(result.dst_path.read_bytes()).decode()
         png_b64 = base64.b64encode(result.preview_path.read_bytes()).decode()
         files_b64 = {fmt: base64.b64encode(path.read_bytes()).decode() for fmt, path in result.files.items()}
 
     v = result.verified
+    recorded = report_stats("convert", preset=preset, fabric=fabric or "", colors=len(result.design.blocks),
+                            stitches=v.stitch_count, formats=list(wanted or ("dst",)))
     return {
         "filename": safe_stem(file.filename),
+        "stats_recorded": recorded,
         "stats": {
             "width_mm": round(v.width_mm, 1),
             "height_mm": round(v.height_mm, 1),

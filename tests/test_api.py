@@ -189,3 +189,48 @@ def test_nearest_thread_is_perceptual():
     assert names == {"#fcd23d": "Harvest Gold", "#ffffff": "White", "#1e50d6": "Ultramarine",
                      "#c8102e": "Red", "#00843d": "Emerald Green", "#111111": "Black"}
     assert "blue" in th.nearest("janome", "#1e50d6")["name"].lower()
+
+
+def test_stats_are_reported_server_side(client, monkeypatch):
+    sent = []
+
+    class FakeResp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return b'{"ok": true}'
+
+    def fake_urlopen(req, timeout):
+        sent.append((req.full_url, req.headers, json.loads(req.data)))
+        return FakeResp()
+
+    monkeypatch.setattr(main, "STATS_SECRET", "s3cret")
+    monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
+    r = client.post("/api/digitize", files={"file": ("a.png", text_png(), "image/png")},
+                    data={"preset": "hat", "fabric": "tee", "formats": "dst,pes"})
+    assert r.status_code == 200 and r.json()["stats_recorded"] is True
+    url, headers, body = sent[-1]
+    assert url == main.STATS_URL and headers["X-aloha-secret"] == "s3cret"
+    assert body["kind"] == "aloha" and body["event"] == "convert"
+    assert body["preset"] == "hat" and body["fabric"] == "tee" and body["colors"] == 1
+    assert body["stitches"] == r.json()["stats"]["stitches"] and body["formats"] == ["dst", "pes"]
+
+    # A digitizing failure is reported as an error event.
+    blank = png_bytes(np.zeros((50, 50), np.uint8))
+    r = client.post("/api/digitize", files={"file": ("a.png", blank, "image/png")})
+    assert r.status_code == 422 and sent[-1][2]["event"] == "error"
+
+
+def test_stats_off_without_secret(client, monkeypatch):
+    monkeypatch.setattr(main, "STATS_SECRET", "")
+    monkeypatch.setattr(main.urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("called")))
+    r = client.post("/api/digitize", files={"file": ("a.png", text_png(), "image/png")})
+    assert r.status_code == 200 and r.json()["stats_recorded"] is False
+
+
+def test_stats_failure_never_breaks_conversion(client, monkeypatch):
+    monkeypatch.setattr(main, "STATS_SECRET", "s3cret")
+    def boom(*a, **k): raise OSError("network down")
+    monkeypatch.setattr(main.urllib.request, "urlopen", boom)
+    r = client.post("/api/digitize", files={"file": ("a.png", text_png(), "image/png")})
+    assert r.status_code == 200 and r.json()["stats_recorded"] is False
