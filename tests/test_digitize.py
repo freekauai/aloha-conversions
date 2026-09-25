@@ -384,3 +384,44 @@ def test_extra_formats_are_written_and_readable(tmp_path):
     # PES carries colors: three threads for three blocks.
     pes = pyembroidery.read(str(result.files["pes"]))
     assert len(pes.threadlist) == 3
+
+
+# --------------------------------------------------------------------------- satin
+
+
+def test_narrow_stroke_gets_satin_across_its_width(tmp_path):
+    """A 2 mm x 40 mm bar: satin stitches run edge to edge (~2 mm long), not
+    along 0.42 mm tatami rows, and the column reaches both ends of the bar."""
+    img = np.zeros((300, 900), np.uint8)
+    img[140:160, 50:850] = 255  # 20 px tall bar -> ~2.2 mm at 100 mm wide... scaled below
+    result = run(img, dz.Options(width_mm=40), tmp_path)
+    shape = result.design.shapes[0]
+    width = shape.bounds[3] - shape.bounds[1]
+    assert width < 3
+    lengths = [math.dist(a, b) for a, b in stitch_segments(result.verified.pattern)]
+    across = [l for l in lengths if abs(l - width) < 0.3]
+    assert len(across) > 0.6 * len(lengths)  # most stitches span the stroke
+    assert abs(result.verified.width_mm - 40) <= 0.6  # satin reaches the bar's ends
+    # Turned off, the same bar is tatami: mostly short row stitches.
+    plain = run(img, dz.Options(width_mm=40, satin_max_mm=0), tmp_path)
+    lengths = [math.dist(a, b) for a, b in stitch_segments(plain.verified.pattern)]
+    assert sum(1 for l in lengths if abs(l - width) < 0.3) < 0.2 * len(lengths)
+
+
+def test_wide_shape_stays_tatami(tmp_path):
+    result = run(rectangle_image(), dz.Options(width_mm=60), tmp_path)  # 60 x 30 mm block
+    assert not dz.satin_mod.is_narrow(result.design.shapes[0])
+    dirs = fill_directions(result.verified.pattern)
+    assert len(dirs) > 100 and all(abs(dy) < 0.05 for _, dy in dirs)
+
+
+def test_ring_letter_satin_stays_inside_and_ends_at_origin(tmp_path):
+    result = run(letter_image("O"), dz.Options(width_mm=20), tmp_path)  # ~4.5 mm wall
+    shape = result.design.shapes[0]
+    assert dz.satin_mod.is_narrow(shape)
+    pts = [(x, y) for x, y, c in dz.stitch_points(result.verified.pattern) if c == pyembroidery.STITCH]
+    grown = shape.buffer(0.2)
+    assert all(grown.covers(Point(p)) for p in pts)
+    # Last movement is the jump home, so the next design starts centered.
+    x, y, cmd = dz.stitch_points(result.verified.pattern)[-2]
+    assert (x, y) == (0.0, 0.0)

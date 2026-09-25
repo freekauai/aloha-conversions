@@ -226,6 +226,7 @@ def digitize(
     underlay: str | None = Form(None),
     pull_comp_mm: float | None = Form(None),
     formats: str = Form("dst"),  # comma-separated: dst,pes,jef,exp,vp3
+    satin_max_mm: float = Form(6.0),  # strokes narrower than this get satin; 0 = tatami everything
 ):
     # Sync handler: FastAPI runs it in a worker thread, keeping the loop free.
     if mode not in ("fill", "outline"):
@@ -279,6 +280,8 @@ def digitize(
         if not 0 <= pull_comp_mm <= dz.MAX_PULL_COMP_MM:
             raise HTTPException(422, f"Pull compensation must be 0–{dz.MAX_PULL_COMP_MM} mm.")
         pull = pull_comp_mm
+    if not 0 <= satin_max_mm <= 12:
+        raise HTTPException(422, "Satin width must be 0–12 mm.")
     if not -90 <= angle_deg <= 90:
         raise HTTPException(422, "Fill angle must be between -90 and 90 degrees.")
     wanted = tuple(dict.fromkeys(f.strip().lower() for f in formats.split(",") if f.strip()))
@@ -289,14 +292,16 @@ def digitize(
     opts = dz.Options(width_mm=width_mm, max_height_mm=max_height_mm, mode=mode,
                       invert=invert, subject=subject, spacing_mm=spacing_mm, triple_run=triple_run,
                       colors=colors, thread_colors=threads, stitch_background=stitch_background,
-                      row_spacing_mm=spacing, angle_deg=angle_deg, underlay=under, pull_comp_mm=pull)
+                      row_spacing_mm=spacing, angle_deg=angle_deg, underlay=under, pull_comp_mm=pull,
+                      satin_max_mm=satin_max_mm)
 
     # Files are written to a per-request temp dir (the DST must round-trip
     # through disk to be verified) and returned inline, so the engine keeps
     # no state between requests and can run as a serverless function.
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            result = dz.digitize_to_files(image, opts, Path(tmp), color, wanted or ("dst",))
+            result = dz.digitize_to_files(image, opts, Path(tmp), color, wanted or ("dst",),
+                                          name=safe_stem(file.filename))
         except dz.DigitizeError as e:
             report_stats("error", preset=preset, fabric=fabric or "")
             raise HTTPException(422, str(e))
@@ -330,7 +335,7 @@ def digitize(
         ],
         "warnings": result.design.warnings,
         "sewing": {"row_spacing_mm": spacing, "angle_deg": angle_deg, "underlay": under, "pull_comp_mm": pull,
-                   "fabric": fabric},
+                   "fabric": fabric, "satin_max_mm": satin_max_mm},
         "threads": {chart: [th.nearest(chart, b.thread_hex) for b in result.design.blocks] for chart in th.CHARTS},
         "dst_base64": dst_b64,
         "preview_png_base64": png_b64,

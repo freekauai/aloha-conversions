@@ -33,6 +33,8 @@ from shapely.geometry import LineString, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.prepared import prep
 
+from . import satin as satin_mod
+
 Point = tuple[float, float]
 
 MM_PER_INCH = 25.4
@@ -59,6 +61,7 @@ TIE_MM = 0.5  # lock-stitch length at the start and end of every run
 
 # 9: travel rule
 MAX_TRAVEL_MM = 2.5
+FILL_WALK_MM = 6.0  # inside a fill, hops up to this long are walked with running stitches, not trimmed
 TRAVEL_TOLERANCE_MM = 0.1  # slack for "does the travel line stay inside the shape"
 
 # Multi-color
@@ -70,6 +73,7 @@ SEAM_GAP_MM = 0.15  # pixel masks leave ~0.1 mm between neighbouring colors; bri
 # Limits and reporting
 MAX_STITCHES = 60_000  # a 10 in fill runs ~50k; 30k made the large presets unusable
 SMALL_FEATURE_MM = 6.0
+FEATURE_GAP_RATIO = 0.5  # i-dot sits ~0.3-0.5 of its height above the stem; a word under a logo sits further
 STITCHES_PER_MINUTE = 700
 DST_UNITS_PER_MM = 10  # DST / pyembroidery units are 0.1 mm
 
@@ -144,6 +148,7 @@ class Options:
     angle_deg: float = 0.0  # fill direction, counter-clockwise from horizontal
     underlay: str = "contour"  # "none" | "contour" | "full" (contour + sparse cross fill)
     pull_comp_mm: float = 0.0  # grow shapes back out by this much to counter thread pull-in
+    satin_max_mm: float = 6.0  # strokes narrower than this get satin instead of tatami; 0 = never
 
 
 @dataclass
@@ -343,8 +348,9 @@ def apply_letter_spacing(polys: list[Polygon], spacing_mm: float) -> list[Polygo
 
 def feature_groups(polys: list[Polygon]) -> list[list[int]]:
     """Group shapes into features for size checks: shapes that overlap in x
-    and are vertically close (gap no bigger than the smaller shape, like the
-    dot of an i) join. Unlike glyph_clusters, separate lines of text stay apart."""
+    and are vertically close (gap under FEATURE_GAP_RATIO of the smaller shape's
+    height, like the dot of an i) join. Unlike glyph_clusters, separate lines
+    of text, or lettering under a logo, stay apart."""
     parent = list(range(len(polys)))
 
     def find(i: int) -> int:
@@ -358,8 +364,10 @@ def feature_groups(polys: list[Polygon]) -> list[list[int]]:
         for j in range(i + 1, len(bounds)):
             b = bounds[j]
             if a[0] < b[2] and b[0] < a[2]:
-                gap = max(b[1] - a[3], a[1] - b[3])
-                if gap <= min(a[3] - a[1], b[3] - b[1]):
+                # Real gap between the shapes, not between bounding boxes: a
+                # long diagonal stroke's box can reach a word sitting below it.
+                gap = polys[i].distance(polys[j])
+                if gap <= FEATURE_GAP_RATIO * min(a[3] - a[1], b[3] - b[1]):
                     parent[find(i)] = find(j)
     groups: dict[int, list[int]] = defaultdict(list)
     for i in range(len(polys)):
@@ -508,9 +516,12 @@ class StitchPlanner:
         self.runs: list[list[Point]] = []
         self.run: list[Point] | None = None
         self.region = None
-        # Underlay is covered by the fill, so a long move that stays inside the
-        # shape can be walked with running stitches instead of trimmed.
-        self.walk = False
+        # A move that stays inside the shape and is no longer than walk_max is
+        # walked with running stitches instead of trimmed. Underlay and satin
+        # set it to infinity (the fill covers the walk); tatami allows short
+        # hops (a pro does the same: a 5 mm run inside a fill is invisible, a
+        # trim costs time and a loose end).
+        self.walk_max = MAX_TRAVEL_MM
 
     @property
     def pos(self) -> Point:
@@ -530,7 +541,7 @@ class StitchPlanner:
             if d <= MAX_TRAVEL_MM and inside:
                 self.stitch(p)
                 return
-            if self.walk and inside:
+            if inside and d <= self.walk_max:
                 for q in subdivide([last, p], MAX_TRAVEL_MM)[1:]:
                     self.stitch(q)
                 return
@@ -645,12 +656,23 @@ def _rotate(points: list[Point], deg: float) -> list[Point]:
 
 def plan_stitches(shapes: list[Polygon], mode: str = "fill", triple_run: bool = False,
                   row_spacing: float = FILL_ROW_SPACING_MM, angle_deg: float = 0.0,
-                  underlay: str = "contour") -> list[list[Point]]:
-    """Stitch runs for the shapes, in order. The fill is planned on the shape
-    rotated by -angle (so rows are horizontal), then rotated back."""
+                  underlay: str = "contour", satin_max: float = 0.0) -> list[list[Point]]:
+    """Stitch runs for the shapes, in order. Narrow shapes (strokes, lettering)
+    get satin; areas get tatami, planned on the shape rotated by -angle (so
+    rows are horizontal) and rotated back."""
     planner = StitchPlanner()
     for shape in shapes:
         first_run = len(planner.runs)
+        if mode == "fill" and satin_max > 0 and satin_mod.is_narrow(shape, satin_max):
+            planner.region = prep(shape.buffer(TRAVEL_TOLERANCE_MM))
+            runs = satin_mod.satin_plan(shape, planner.pos, max_width=satin_max)
+            if runs:
+                planner.walk_max = math.inf  # hops between branches hide under the satin
+                for run in runs:
+                    planner.path(run)
+                planner.walk_max = MAX_TRAVEL_MM
+                planner.break_run()
+                continue
         work = affinity.rotate(shape, -angle_deg, origin=(0, 0)) if angle_deg else shape
         planner.region = prep(work.buffer(TRAVEL_TOLERANCE_MM))
         if mode == "outline":
@@ -668,7 +690,7 @@ def plan_stitches(shapes: list[Polygon], mode: str = "fill", triple_run: bool = 
                 _, y, x0, x1 = segs[i]
                 start = (x0 if forward else x1, y)
             if underlay != "none":
-                planner.walk = True
+                planner.walk_max = math.inf
                 inner = polygons_of(work.buffer(-UNDERLAY_INSET_MM, join_style="mitre"))
                 if underlay == "full":
                     # Sparse rows across the fill direction, then the contour.
@@ -684,8 +706,9 @@ def plan_stitches(shapes: list[Polygon], mode: str = "fill", triple_run: bool = 
                             planner.run = _rotate(planner.run, -90)
                     planner.region = prep(work.buffer(TRAVEL_TOLERANCE_MM))
                 planner.underlay_rings([r for p in inner for r in rings_of(p)], UNDERLAY_STITCH_MM, end_near=start)
-                planner.walk = False
+            planner.walk_max = FILL_WALK_MM
             planner.tatami(work, segs)
+            planner.walk_max = MAX_TRAVEL_MM
         planner.break_run()  # TRIM after each shape
         if angle_deg:
             for r in range(first_run, len(planner.runs)):
@@ -880,7 +903,8 @@ def plan_design(image: np.ndarray, opts: Options) -> Design:
         shapes = order_center_out(simplify_shapes(shapes))
         if not shapes:
             continue
-        runs = plan_stitches(shapes, opts.mode, opts.triple_run, opts.row_spacing_mm, opts.angle_deg, opts.underlay)
+        runs = plan_stitches(shapes, opts.mode, opts.triple_run, opts.row_spacing_mm, opts.angle_deg,
+                             opts.underlay, opts.satin_max_mm)
         plans.append(BlockPlan(thread, det, area, shapes, runs))
     if not plans:
         raise DigitizeError("Every shape is too small to stitch at this size. Try a larger size.")
@@ -925,10 +949,12 @@ def _units(p: Point) -> tuple[float, float]:
     return round(p[0] * DST_UNITS_PER_MM), round(p[1] * DST_UNITS_PER_MM)
 
 
-def build_pattern(blocks: list[tuple[str, list[list[Point]]]]) -> pyembroidery.EmbPattern:
+def build_pattern(blocks: list[tuple[str, list[list[Point]]]], name: str = "design") -> pyembroidery.EmbPattern:
     """blocks: (thread hex, runs) per color, in sewing order. A COLOR_CHANGE
-    (a stop, in DST) separates colors; TRIM ends every run."""
+    (a stop, in DST) separates colors; TRIM ends every run. The design starts
+    and finishes at the origin (its center), as machines expect."""
     pattern = pyembroidery.EmbPattern()
+    pattern.extras["name"] = name[:16]  # DST label field
     for n, (color_hex, runs) in enumerate(blocks):
         thread = pyembroidery.EmbThread()
         thread.set_hex_color(color_hex)
@@ -941,6 +967,7 @@ def build_pattern(blocks: list[tuple[str, list[list[Point]]]]) -> pyembroidery.E
             for p in pts:
                 pattern.add_stitch_absolute(pyembroidery.STITCH, *_units(p))
             pattern.add_command(pyembroidery.TRIM)
+    pattern.add_stitch_absolute(pyembroidery.JUMP, 0, 0)  # back to center for the next piece
     pattern.add_command(pyembroidery.END)
     return pattern
 
@@ -1054,7 +1081,8 @@ class Result:
 
 
 def digitize_to_files(image: np.ndarray, opts: Options, out_dir: Path,
-                      color_hex: str = "#ffffff", formats: tuple[str, ...] = ("dst",)) -> Result:
+                      color_hex: str = "#ffffff", formats: tuple[str, ...] = ("dst",),
+                      name: str = "design") -> Result:
     if opts.colors <= 1 and not opts.thread_colors:
         opts = replace(opts, thread_colors=(color_hex,))
     design = plan_design(image, opts)
@@ -1066,7 +1094,7 @@ def digitize_to_files(image: np.ndarray, opts: Options, out_dir: Path,
         raise DigitizeError("Nothing to stitch at this size. Try a larger size.")
 
     dst_path = out_dir / "design.dst"
-    pattern = build_pattern([(b.thread_hex, b.runs) for b in design.blocks])
+    pattern = build_pattern([(b.thread_hex, b.runs) for b in design.blocks], name)
     verified = write_and_verify(pattern, dst_path)
     if verified.stitch_count > MAX_STITCHES:
         raise DigitizeError(too_many)

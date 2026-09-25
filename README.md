@@ -97,6 +97,20 @@ is dark, or light grey when the thread itself is very dark.
   like *i* and its dot) is under 6 mm tall.
 - Sew time is `stitches / 700` minutes; it doesn't count trims or color stops.
 
+## Satin for strokes and lettering
+
+Any shape narrower than `satin_max_mm` (default 6; 0 disables) is sewn as satin —
+zigzag columns across the stroke, following its centerline — instead of tatami,
+which is what a digitizer does for lettering and line art. `backend/satin.py`:
+Voronoi medial axis of the boundary, pruned of corner spurs and extended to the
+stroke tips; per branch a center-run underlay out and satin back; cross-sections are
+capped near the local stroke width so junctions don't spike. Hops between branches
+are walked under the satin, not trimmed.
+
+Inside tatami fills, hops up to 6 mm that stay inside the shape are walked with
+running stitches instead of trimmed. The design starts at and returns to its center,
+and the DST label carries the design name.
+
 ## Sewing controls
 
 `GET /api/sewing` lists the fabric presets, densities, underlay types and file formats.
