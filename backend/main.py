@@ -211,7 +211,8 @@ def digitize(
     width_in: float | None = Form(None),
     height_in: float | None = Form(None),
     mode: str = Form("fill"),
-    invert: bool = Form(False),
+    invert: bool = Form(False),  # legacy; subject=dark
+    subject: str = Form("auto"),  # auto | dark | light: which tone is the artwork
     spacing_mm: float = Form(1.3),
     color: str = Form("#ffffff"),
     triple_run: bool = Form(False),
@@ -233,6 +234,8 @@ def digitize(
         raise HTTPException(422, "Letter spacing must be between 0 and 3 mm.")
     if not COLOR.match(color):
         raise HTTPException(422, "Thread color must look like #rrggbb.")
+    if subject not in dz.SUBJECTS:
+        raise HTTPException(422, "Subject must be auto, dark or light.")
     if not 1 <= colors <= dz.MAX_COLORS:
         raise HTTPException(422, f"Colors must be 1–{dz.MAX_COLORS}.")
     threads = None
@@ -284,7 +287,7 @@ def digitize(
         raise HTTPException(422, f"Unknown format(s): {', '.join(bad)}.")
 
     opts = dz.Options(width_mm=width_mm, max_height_mm=max_height_mm, mode=mode,
-                      invert=invert, spacing_mm=spacing_mm, triple_run=triple_run,
+                      invert=invert, subject=subject, spacing_mm=spacing_mm, triple_run=triple_run,
                       colors=colors, thread_colors=threads, stitch_background=stitch_background,
                       row_spacing_mm=spacing, angle_deg=angle_deg, underlay=under, pull_comp_mm=pull)
 
@@ -307,6 +310,7 @@ def digitize(
     return {
         "filename": safe_stem(file.filename),
         "stats_recorded": recorded,
+        "subject": result.design.subject,  # single-color: which tone got stitched
         "stats": {
             "width_mm": round(v.width_mm, 1),
             "height_mm": round(v.height_mm, 1),

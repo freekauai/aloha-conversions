@@ -114,18 +114,31 @@ def test_height_is_clamped_to_preset_max(tmp_path):
     assert abs(result.verified.height_mm - max_h) <= 0.5
 
 
-def test_invert_stitches_the_dark_parts(tmp_path):
-    img = 255 - rectangle_image()  # black rectangle on a white page
-    inverted = run(img, dz.Options(width_mm=100, invert=True), tmp_path)
-    assert len(inverted.design.shapes) == 1
-    assert len(inverted.design.shapes[0].interiors) == 0
-    # Not inverted, the white page is stitched: a frame with the rectangle as its hole.
-    plain = dz.plan_design(img, dz.Options(width_mm=100))
+def test_subject_auto_stitches_the_artwork_not_the_page(tmp_path):
+    black_on_white = 255 - rectangle_image()
+    white_on_black = rectangle_image()
+    for img, expect in ((black_on_white, "dark"), (white_on_black, "light")):
+        assert dz.detect_subject(img) == expect
+        result = run(img, dz.Options(width_mm=100), tmp_path)  # subject="auto"
+        assert result.design.subject == expect
+        assert len(result.design.shapes) == 1 and len(result.design.shapes[0].interiors) == 0
+    # Forcing "light" on the black-on-white page stitches the page: a frame with a hole.
+    plain = dz.plan_design(black_on_white, dz.Options(width_mm=100, subject="light"))
     assert [len(s.interiors) for s in plain.shapes] == [1]
+    # Legacy invert=True still means "dark".
+    assert run(black_on_white, dz.Options(width_mm=100, invert=True), tmp_path).design.subject == "dark"
+
+
+def test_subject_auto_on_transparent_png():
+    img = np.zeros((200, 400, 4), np.uint8)
+    cv2.putText(img, "HI", (40, 150), cv2.FONT_HERSHEY_DUPLEX, 4, (20, 20, 20, 255), 12)  # dark art, clear page
+    assert dz.detect_subject(img) == "dark"
+    img[:, :, :3] = 255; img[:, :, :3][img[:, :, 3] == 0] = 0
+    assert dz.detect_subject(img) == "light"  # white art, clear page
 
 
 def test_blank_image_raises(tmp_path):
-    with pytest.raises(dz.DigitizeError, match="Invert"):
+    with pytest.raises(dz.DigitizeError, match="stitching the"):
         run(np.zeros((100, 100), np.uint8), dz.Options(width_mm=50), tmp_path)
 
 

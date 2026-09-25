@@ -79,7 +79,7 @@ def test_jpeg_dimensions_are_read_from_header():
 
 def test_blank_image_gives_helpful_error(client):
     r = client.post("/api/digitize", files={"file": ("a.png", png_bytes(np.zeros((50, 50), np.uint8)), "image/png")})
-    assert r.status_code == 422 and "Invert" in r.json()["detail"]
+    assert r.status_code == 422 and "stitching the" in r.json()["detail"]
 
 
 def test_presets_endpoint_lists_every_preset(client):

@@ -132,7 +132,8 @@ class Options:
     width_mm: float
     max_height_mm: float | None = None
     mode: str = "fill"  # "fill" | "outline"
-    invert: bool = False
+    invert: bool = False  # legacy: True means subject="dark"
+    subject: str = "auto"  # which tone is the artwork: auto | dark | light
     spacing_mm: float = 1.3
     triple_run: bool = False
     colors: int = 1  # 1 = threshold (single thread); 2..MAX_COLORS = k-means blocks
@@ -152,6 +153,7 @@ class Design:
     min_feature_mm: float | None
     warnings: list[str] = field(default_factory=list)
     blocks: list["BlockPlan"] = field(default_factory=list)  # per color, sewing order
+    subject: str | None = None  # single-color: "dark" or "light", after auto-detection
 
 
 @dataclass
@@ -193,12 +195,10 @@ def resolve_size(preset: str, custom_width_in: float | None = None,
 # --------------------------------------------------------------------------- 1
 
 
-def load_mask(image: np.ndarray, invert: bool = False) -> np.ndarray:
-    """Binary uint8 mask (255 = stitch) from a gray, BGR or BGRA image.
+SUBJECTS = ("auto", "dark", "light")
 
-    Light pixels are stitched by default; `invert` stitches the dark ones.
-    Transparent pixels are always background.
-    """
+
+def _gray_and_alpha(image: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
     alpha = None
     if image.ndim == 3 and image.shape[2] == 4:
         alpha = image[:, :, 3]
@@ -211,8 +211,36 @@ def load_mask(image: np.ndarray, invert: bool = False) -> np.ndarray:
         gray = (gray / 257).astype(np.uint8)
         if alpha is not None:
             alpha = (alpha / 257).astype(np.uint8)
+    return gray, alpha
 
-    mode = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+
+def detect_subject(image: np.ndarray) -> str:
+    """Which tone is the artwork: the one that does NOT own the image border.
+    Dark logo on a white page -> "dark". White lettering on black -> "light".
+    For a transparent PNG the page is the transparency, so the artwork is
+    whichever tone has more opaque pixels."""
+    gray, alpha = _gray_and_alpha(image)
+    light = gray >= THRESHOLD
+    if alpha is not None:
+        opaque = alpha >= THRESHOLD
+        border = np.concatenate([opaque[0], opaque[-1], opaque[:, 0], opaque[:, -1]])
+        if border.mean() < 0.5:  # transparent page
+            return "light" if light[opaque].mean() >= 0.5 else "dark"
+        light = light & opaque
+    border = np.concatenate([light[0], light[-1], light[:, 0], light[:, -1]])
+    return "dark" if border.mean() >= 0.5 else "light"
+
+
+def load_mask(image: np.ndarray, subject: str = "auto") -> np.ndarray:
+    """Binary uint8 mask (255 = stitch) from a gray, BGR or BGRA image.
+
+    `subject` picks which tone is the artwork: "dark", "light", or "auto"
+    (see detect_subject). Transparent pixels are always background.
+    """
+    if subject == "auto":
+        subject = detect_subject(image)
+    gray, alpha = _gray_and_alpha(image)
+    mode = cv2.THRESH_BINARY_INV if subject == "dark" else cv2.THRESH_BINARY
     _, mask = cv2.threshold(gray, THRESHOLD - 1, 255, mode)  # light = gray >= 128
     if alpha is not None:
         mask[alpha < THRESHOLD] = 0
@@ -814,8 +842,12 @@ def underlap(groups: list[list[Polygon]]) -> list[list[Polygon]]:
 
 
 def plan_design(image: np.ndarray, opts: Options) -> Design:
+    subject = None
     if opts.colors <= 1:
-        masks = [load_mask(image, opts.invert)]
+        subject = "dark" if opts.invert else opts.subject
+        if subject == "auto":
+            subject = detect_subject(image)
+        masks = [load_mask(image, subject)]
         hexes = detected = [opts.thread_colors[0] if opts.thread_colors else "#ffffff"]
         areas = [100.0]
     else:
@@ -831,7 +863,7 @@ def plan_design(image: np.ndarray, opts: Options) -> Design:
 
     groups = [extract_polygons(m) for m in masks]
     if not any(groups):
-        hint = "turning Invert off" if opts.invert else "turning Invert on"
+        hint = ("stitching the light parts" if subject == "dark" else "stitching the dark parts") if subject else "fewer colors"
         raise DigitizeError(f"No stitchable shapes found in the image. Try {hint}.")
     groups = _fit_all(groups, opts)
     min_feature = min_feature_height([p for g in groups for p in g])
@@ -865,6 +897,7 @@ def plan_design(image: np.ndarray, opts: Options) -> Design:
         min_feature_mm=min_feature,
         warnings=warnings,
         blocks=plans,
+        subject=subject,
     )
 
 
