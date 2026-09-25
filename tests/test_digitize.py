@@ -313,3 +313,61 @@ def test_antialiased_edges_do_not_become_a_color():
     cv2.circle(img, (500, 200), 150, (200, 60, 20), -1, lineType=cv2.LINE_AA)
     blocks = dz.detect_colors(img, 4)
     assert len(blocks) == 2  # page + disc; the soft edge merged away
+
+
+# --------------------------------------------------------------------------- sewing controls
+
+
+def fill_directions(pattern):
+    """Unit direction of every fill-length stitch, so we can read the fill angle back."""
+    dirs = []
+    for (ax, ay), (bx, by) in stitch_segments(pattern):
+        d = math.hypot(bx - ax, by - ay)
+        if d > 2.6:  # fill rows run to 3.0 mm; underlay is 2.5, ties shorter
+            dirs.append(((bx - ax) / d, (by - ay) / d))
+    return dirs
+
+
+def test_fill_angle_rotates_the_rows(tmp_path):
+    flat = run(rectangle_image(), dz.Options(width_mm=60, angle_deg=0), tmp_path)
+    tilted = run(rectangle_image(), dz.Options(width_mm=60, angle_deg=45), tmp_path)
+    assert all(abs(dy) < 0.05 for _, dy in fill_directions(flat.verified.pattern))
+    diag = [abs(abs(dx) - abs(dy)) < 0.1 for dx, dy in fill_directions(tilted.verified.pattern)]
+    assert sum(diag) > 0.9 * len(diag)
+    assert abs(tilted.verified.width_mm - 60) <= 0.5  # angle doesn't change the size
+
+
+def test_density_changes_stitch_count(tmp_path):
+    light = run(rectangle_image(), dz.Options(width_mm=60, row_spacing_mm=0.50), tmp_path)
+    dense = run(rectangle_image(), dz.Options(width_mm=60, row_spacing_mm=0.35), tmp_path)
+    assert 1.25 < dense.verified.stitch_count / light.verified.stitch_count < 1.6
+
+
+def test_underlay_types(tmp_path):
+    none = run(rectangle_image(), dz.Options(width_mm=60, underlay="none"), tmp_path)
+    contour = run(rectangle_image(), dz.Options(width_mm=60, underlay="contour"), tmp_path)
+    full = run(rectangle_image(), dz.Options(width_mm=60, underlay="full"), tmp_path)
+    assert none.verified.stitch_count < contour.verified.stitch_count < full.verified.stitch_count
+    # "full" adds sparse vertical rows: some stitch directions should be vertical.
+    vertical = [abs(dx) < 0.05 for dx, _ in fill_directions(full.verified.pattern)]
+    assert any(vertical) and not all(vertical)
+
+
+def test_pull_compensation_grows_shapes(tmp_path):
+    base = run(rectangle_image(), dz.Options(width_mm=60), tmp_path)
+    comp = run(rectangle_image(), dz.Options(width_mm=60, pull_comp_mm=0.3), tmp_path)
+    assert comp.design.shapes[0].area > base.design.shapes[0].area
+    assert comp.verified.width_mm - base.verified.width_mm == pytest.approx(0.6, abs=0.2)
+
+
+def test_extra_formats_are_written_and_readable(tmp_path):
+    result = dz.digitize_to_files(three_color_image(), dz.Options(width_mm=60, colors=4), tmp_path,
+                                  formats=("dst", "pes", "jef", "exp", "vp3"))
+    assert set(result.files) == {"dst", "pes", "jef", "exp", "vp3"}
+    for fmt, path in result.files.items():
+        assert path.stat().st_size > 100
+        back = pyembroidery.read(str(path))
+        assert back is not None and back.count_stitches() > 100, fmt
+    # PES carries colors: three threads for three blocks.
+    pes = pyembroidery.read(str(result.files["pes"]))
+    assert len(pes.threadlist) == 3

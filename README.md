@@ -97,6 +97,29 @@ is dark, or light grey when the thread itself is very dark.
   like *i* and its dot) is under 6 mm tall.
 - Sew time is `stitches / 700` minutes; it doesn't count trims or color stops.
 
+## Sewing controls
+
+`GET /api/sewing` lists the fabric presets, densities, underlay types and file formats.
+On `POST /api/digitize`:
+
+- `fabric` (cap, tee, polo, fleece, towel, denim) sets density, underlay and pull
+  compensation together; `density` (light 0.50 / normal 0.42 / dense 0.35 mm rows),
+  `row_spacing_mm`, `underlay` (none / contour / full) and `pull_comp_mm` (0–0.5)
+  override it individually.
+- `angle_deg` (-90…90) rotates the fill rows. The fill is planned on the rotated shape
+  and rotated back, so size and edges are unchanged.
+- "full" underlay = contour plus a sparse 2 mm cross-hatch under the fill. Underlay
+  travel inside a shape is walked with running stitches rather than trimmed, since
+  the fill covers it.
+- Pull compensation grows the shapes back out after the 0.2 mm inset (so the net
+  inset is 0.2 − comp, and above 0.2 mm the design is slightly wider than requested,
+  on purpose: the fabric pulls it back).
+- `formats` (comma list of dst, pes, jef, exp, vp3) returns each file in
+  `files_base64`. PES/JEF/VP3 carry the thread colors.
+
+`GET /api/threads` returns real thread charts (Brother and Janome, from the tables
+pyembroidery ships) and the digitize response lists the nearest chart thread per block.
+
 ## Rate limit
 
 `POST /api/digitize` and `/api/colors` are limited per client IP to `RATE_LIMIT`

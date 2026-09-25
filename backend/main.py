@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import digitize as dz
+from . import threads as th
 
 # Vercel caps request bodies at 4.5 MB; the pages shrink big images before upload.
 MAX_UPLOAD_BYTES = int(float(os.environ.get("MAX_UPLOAD_MB", "10")) * 1024 * 1024)
@@ -142,6 +143,23 @@ def presets():
     }
 
 
+@app.get("/api/threads")
+def threads():
+    return {"charts": th.CHARTS}
+
+
+@app.get("/api/sewing")
+def sewing():
+    return {
+        "fabrics": [{"id": k, "label": f.label, "row_spacing_mm": f.row_spacing_mm, "underlay": f.underlay,
+                     "pull_comp_mm": f.pull_comp_mm, "hint": f.hint} for k, f in dz.FABRICS.items()],
+        "densities": dz.DENSITIES,
+        "underlay_types": list(dz.UNDERLAY_TYPES),
+        "max_pull_comp_mm": dz.MAX_PULL_COMP_MM,
+        "formats": [{"id": k, "label": v[0]} for k, v in dz.FORMATS.items()],
+    }
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True}
@@ -176,6 +194,13 @@ def digitize(
     colors: int = Form(1),
     thread_colors: str | None = Form(None),  # JSON array of #rrggbb, one per detected block
     stitch_background: bool = Form(False),
+    fabric: str | None = Form(None),  # a FABRICS id; sets the three below unless overridden
+    density: str | None = Form(None),  # light | normal | dense
+    row_spacing_mm: float | None = Form(None),
+    angle_deg: float = Form(0),
+    underlay: str | None = Form(None),
+    pull_comp_mm: float | None = Form(None),
+    formats: str = Form("dst"),  # comma-separated: dst,pes,jef,exp,vp3
 ):
     # Sync handler: FastAPI runs it in a worker thread, keeping the loop free.
     if mode not in ("fill", "outline"):
@@ -204,20 +229,52 @@ def digitize(
         width_mm, max_height_mm = dz.resolve_size(preset, width_in, height_in)
     except dz.DigitizeError as e:
         raise HTTPException(422, str(e))
+    # Sewing controls: fabric preset first, then any explicit overrides.
+    spacing, under, pull = 0.42, "contour", 0.0
+    if fabric:
+        if fabric not in dz.FABRICS:
+            raise HTTPException(422, f"Unknown fabric {fabric!r}.")
+        f = dz.FABRICS[fabric]
+        spacing, under, pull = f.row_spacing_mm, f.underlay, f.pull_comp_mm
+    if density:
+        if density not in dz.DENSITIES:
+            raise HTTPException(422, "Density must be light, normal or dense.")
+        spacing = dz.DENSITIES[density]
+    if row_spacing_mm is not None:
+        if not 0.3 <= row_spacing_mm <= 0.8:
+            raise HTTPException(422, "Row spacing must be 0.3–0.8 mm.")
+        spacing = row_spacing_mm
+    if underlay is not None:
+        if underlay not in dz.UNDERLAY_TYPES:
+            raise HTTPException(422, "Underlay must be none, contour or full.")
+        under = underlay
+    if pull_comp_mm is not None:
+        if not 0 <= pull_comp_mm <= dz.MAX_PULL_COMP_MM:
+            raise HTTPException(422, f"Pull compensation must be 0–{dz.MAX_PULL_COMP_MM} mm.")
+        pull = pull_comp_mm
+    if not -90 <= angle_deg <= 90:
+        raise HTTPException(422, "Fill angle must be between -90 and 90 degrees.")
+    wanted = tuple(dict.fromkeys(f.strip().lower() for f in formats.split(",") if f.strip()))
+    bad = [f for f in wanted if f not in dz.FORMATS]
+    if bad:
+        raise HTTPException(422, f"Unknown format(s): {', '.join(bad)}.")
+
     opts = dz.Options(width_mm=width_mm, max_height_mm=max_height_mm, mode=mode,
                       invert=invert, spacing_mm=spacing_mm, triple_run=triple_run,
-                      colors=colors, thread_colors=threads, stitch_background=stitch_background)
+                      colors=colors, thread_colors=threads, stitch_background=stitch_background,
+                      row_spacing_mm=spacing, angle_deg=angle_deg, underlay=under, pull_comp_mm=pull)
 
     # Files are written to a per-request temp dir (the DST must round-trip
     # through disk to be verified) and returned inline, so the engine keeps
     # no state between requests and can run as a serverless function.
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            result = dz.digitize_to_files(image, opts, Path(tmp), color)
+            result = dz.digitize_to_files(image, opts, Path(tmp), color, wanted or ("dst",))
         except dz.DigitizeError as e:
             raise HTTPException(422, str(e))
         dst_b64 = base64.b64encode(result.dst_path.read_bytes()).decode()
         png_b64 = base64.b64encode(result.preview_path.read_bytes()).decode()
+        files_b64 = {fmt: base64.b64encode(path.read_bytes()).decode() for fmt, path in result.files.items()}
 
     v = result.verified
     return {
@@ -240,6 +297,10 @@ def digitize(
             for b in result.design.blocks
         ],
         "warnings": result.design.warnings,
+        "sewing": {"row_spacing_mm": spacing, "angle_deg": angle_deg, "underlay": under, "pull_comp_mm": pull,
+                   "fabric": fabric},
+        "threads": {chart: [th.nearest(chart, b.thread_hex) for b in result.design.blocks] for chart in th.CHARTS},
         "dst_base64": dst_b64,
         "preview_png_base64": png_b64,
+        "files_base64": files_b64,
     }

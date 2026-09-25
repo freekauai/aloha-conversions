@@ -150,3 +150,42 @@ def test_rate_limit_window_slides():
         assert main.rate_limited("1.2.3.4", now=1000 + t) == 0
     assert main.rate_limited("1.2.3.4", now=1000 + main.RATE_LIMIT) > 0
     assert main.rate_limited("1.2.3.4", now=1000 + main.RATE_WINDOW_SECONDS + 1) == 0
+
+
+def test_threads_and_sewing_endpoints(client):
+    t = client.get("/api/threads").json()["charts"]
+    assert {"brother", "janome"} <= set(t)
+    assert all(k in t["brother"]["threads"][0] for k in ("num", "name", "hex"))
+    s = client.get("/api/sewing").json()
+    assert {f["id"] for f in s["fabrics"]} >= {"cap", "tee", "fleece"}
+    assert [f["id"] for f in s["formats"]] == ["dst", "pes", "jef", "exp", "vp3"]
+
+
+def test_fabric_preset_and_formats_in_digitize(client):
+    r = client.post("/api/digitize", files={"file": ("a.png", text_png(), "image/png")},
+                    data={"preset": "hat", "fabric": "fleece", "angle_deg": "30", "formats": "dst,pes,jef"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["sewing"] == {"row_spacing_mm": 0.40, "angle_deg": 30, "underlay": "full",
+                              "pull_comp_mm": 0.30, "fabric": "fleece"}
+    assert set(body["files_base64"]) == {"dst", "pes", "jef"}
+    assert body["threads"]["brother"][0]["name"]
+
+
+def test_sewing_overrides_and_validation(client):
+    r = client.post("/api/digitize", files={"file": ("a.png", text_png(), "image/png")},
+                    data={"fabric": "cap", "density": "dense", "underlay": "none", "pull_comp_mm": "0.1"})
+    assert r.status_code == 200 and r.json()["sewing"]["row_spacing_mm"] == 0.35
+    assert r.json()["sewing"]["underlay"] == "none"
+    for bad in ({"fabric": "silk"}, {"density": "extreme"}, {"underlay": "lots"},
+                {"pull_comp_mm": "2"}, {"formats": "dst,xyz"}, {"angle_deg": "120"}):
+        r = client.post("/api/digitize", files={"file": ("a.png", text_png(), "image/png")}, data=bad)
+        assert r.status_code == 422, bad
+
+
+def test_nearest_thread_is_perceptual():
+    from backend import threads as th
+    names = {hx: th.nearest("brother", hx)["name"] for hx in ("#fcd23d", "#ffffff", "#1e50d6", "#c8102e", "#00843d", "#111111")}
+    assert names == {"#fcd23d": "Harvest Gold", "#ffffff": "White", "#1e50d6": "Ultramarine",
+                     "#c8102e": "Red", "#00843d": "Emerald Green", "#111111": "Black"}
+    assert "blue" in th.nearest("janome", "#1e50d6")["name"].lower()

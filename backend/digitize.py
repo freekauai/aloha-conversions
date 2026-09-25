@@ -97,6 +97,32 @@ PRESETS: dict[str, Preset] = {
 }
 
 
+@dataclass(frozen=True)
+class Fabric:
+    label: str
+    row_spacing_mm: float
+    underlay: str
+    pull_comp_mm: float
+    hint: str
+
+
+# What a digitizer would set for each garment. Stretchy or plush fabrics need
+# more underlay (to hold the loft down) and more pull compensation (the fabric
+# gives, so shapes shrink across the stitch direction).
+FABRICS: dict[str, Fabric] = {
+    "cap": Fabric("Structured cap", 0.40, "contour", 0.15, "Buckram-backed front panel: stable, little pull"),
+    "tee": Fabric("Cotton tee", 0.42, "contour", 0.15, "Light jersey; keep density moderate to avoid puckering"),
+    "polo": Fabric("Polo pique", 0.42, "full", 0.25, "Textured knit; full underlay keeps the fill from sinking"),
+    "fleece": Fabric("Fleece / hoodie", 0.40, "full", 0.30, "Plush and stretchy; full underlay and extra compensation"),
+    "towel": Fabric("Towel", 0.38, "full", 0.35, "Loops swallow stitches; dense fill plus full underlay"),
+    "denim": Fabric("Denim / canvas", 0.42, "contour", 0.10, "Stable heavy fabric; least compensation"),
+}
+DENSITIES = {"light": 0.50, "normal": 0.42, "dense": 0.35}
+UNDERLAY_TYPES = ("none", "contour", "full")
+UNDERLAY_FILL_SPACING_MM = 2.0  # "full" underlay: sparse cross-hatch rows
+MAX_PULL_COMP_MM = 0.5
+
+
 class DigitizeError(ValueError):
     """A user-facing problem with the input or the requested size."""
 
@@ -112,6 +138,11 @@ class Options:
     colors: int = 1  # 1 = threshold (single thread); 2..MAX_COLORS = k-means blocks
     thread_colors: tuple[str, ...] | None = None  # hex per block, sewing order; None = detected
     stitch_background: bool = False  # multi-color: also sew the page/background color
+    # Sewing controls (see FABRICS for the presets that set them together)
+    row_spacing_mm: float = 0.42  # tatami density; smaller = denser
+    angle_deg: float = 0.0  # fill direction, counter-clockwise from horizontal
+    underlay: str = "contour"  # "none" | "contour" | "full" (contour + sparse cross fill)
+    pull_comp_mm: float = 0.0  # grow shapes back out by this much to counter thread pull-in
 
 
 @dataclass
@@ -449,6 +480,9 @@ class StitchPlanner:
         self.runs: list[list[Point]] = []
         self.run: list[Point] | None = None
         self.region = None
+        # Underlay is covered by the fill, so a long move that stays inside the
+        # shape can be walked with running stitches instead of trimmed.
+        self.walk = False
 
     @property
     def pos(self) -> Point:
@@ -464,8 +498,13 @@ class StitchPlanner:
         if self.run:
             last = self.run[-1]
             d = _dist(last, p)
-            if d <= MAX_TRAVEL_MM and (d < 1e-9 or self.region.covers(LineString([last, p]))):
+            inside = d < 1e-9 or self.region.covers(LineString([last, p]))
+            if d <= MAX_TRAVEL_MM and inside:
                 self.stitch(p)
+                return
+            if self.walk and inside:
+                for q in subdivide([last, p], MAX_TRAVEL_MM)[1:]:
+                    self.stitch(q)
                 return
         self.break_run()
         self.run = [p]
@@ -569,14 +608,27 @@ class StitchPlanner:
                 i = min(nxt, key=lambda j: abs((segs[j][2] if forward else segs[j][3]) - end_x))
 
 
-def plan_stitches(shapes: list[Polygon], mode: str = "fill", triple_run: bool = False) -> list[list[Point]]:
+def _rotate(points: list[Point], deg: float) -> list[Point]:
+    if not deg:
+        return points
+    c, si = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return [(x * c - y * si, x * si + y * c) for x, y in points]
+
+
+def plan_stitches(shapes: list[Polygon], mode: str = "fill", triple_run: bool = False,
+                  row_spacing: float = FILL_ROW_SPACING_MM, angle_deg: float = 0.0,
+                  underlay: str = "contour") -> list[list[Point]]:
+    """Stitch runs for the shapes, in order. The fill is planned on the shape
+    rotated by -angle (so rows are horizontal), then rotated back."""
     planner = StitchPlanner()
     for shape in shapes:
-        planner.region = prep(shape.buffer(TRAVEL_TOLERANCE_MM))
+        first_run = len(planner.runs)
+        work = affinity.rotate(shape, -angle_deg, origin=(0, 0)) if angle_deg else shape
+        planner.region = prep(work.buffer(TRAVEL_TOLERANCE_MM))
         if mode == "outline":
-            planner.running_rings(rings_of(shape), OUTLINE_STITCH_MM, triple=triple_run)
+            planner.running_rings(rings_of(work), OUTLINE_STITCH_MM, triple=triple_run)
         else:
-            segs = fill_segments(shape)
+            segs = fill_segments(work, row_spacing)
             # Pick where the fill will begin, then end the underlay right there
             # so the hop from underlay to fill is a short stitch, not a trim.
             start = None
@@ -587,11 +639,29 @@ def plan_stitches(shapes: list[Polygon], mode: str = "fill", triple_run: bool = 
                 i, forward, _ = planner.fill_start(segs, set(range(len(segs))), by_row)
                 _, y, x0, x1 = segs[i]
                 start = (x0 if forward else x1, y)
-            underlay = [r for p in polygons_of(shape.buffer(-UNDERLAY_INSET_MM, join_style="mitre"))
-                        for r in rings_of(p)]
-            planner.underlay_rings(underlay, UNDERLAY_STITCH_MM, end_near=start)
-            planner.tatami(shape, segs)
+            if underlay != "none":
+                planner.walk = True
+                inner = polygons_of(work.buffer(-UNDERLAY_INSET_MM, join_style="mitre"))
+                if underlay == "full":
+                    # Sparse rows across the fill direction, then the contour.
+                    for piece in inner:
+                        cross = affinity.rotate(piece, 90, origin=(0, 0))
+                        planner.region = prep(cross.buffer(TRAVEL_TOLERANCE_MM))
+                        n = len(planner.runs)
+                        planner.tatami(cross, fill_segments(cross, UNDERLAY_FILL_SPACING_MM))
+                        planner.break_run()
+                        for r in range(n, len(planner.runs)):
+                            planner.runs[r] = _rotate(planner.runs[r], -90)
+                        if planner.run:
+                            planner.run = _rotate(planner.run, -90)
+                    planner.region = prep(work.buffer(TRAVEL_TOLERANCE_MM))
+                planner.underlay_rings([r for p in inner for r in rings_of(p)], UNDERLAY_STITCH_MM, end_near=start)
+                planner.walk = False
+            planner.tatami(work, segs)
         planner.break_run()  # TRIM after each shape
+        if angle_deg:
+            for r in range(first_run, len(planner.runs)):
+                planner.runs[r] = _rotate(planner.runs[r], angle_deg)
     return planner.runs
 
 
@@ -770,10 +840,16 @@ def plan_design(image: np.ndarray, opts: Options) -> Design:
 
     plans = []
     for g, thread, det, area in zip(groups, hexes, detected, areas):
-        shapes = order_center_out(simplify_shapes(inset_shapes(g)))
+        shapes = inset_shapes(g)
+        if opts.pull_comp_mm > 0:
+            # Grow back out across the board; the inset already opened the
+            # holes and gaps, so this is a net (INSET - pull_comp) shrink.
+            shapes = [q for p in shapes for q in polygons_of(p.buffer(opts.pull_comp_mm, join_style="mitre"))]
+        shapes = order_center_out(simplify_shapes(shapes))
         if not shapes:
             continue
-        plans.append(BlockPlan(thread, det, area, shapes, plan_stitches(shapes, opts.mode, opts.triple_run)))
+        runs = plan_stitches(shapes, opts.mode, opts.triple_run, opts.row_spacing_mm, opts.angle_deg, opts.underlay)
+        plans.append(BlockPlan(thread, det, area, shapes, runs))
     if not plans:
         raise DigitizeError("Every shape is too small to stitch at this size. Try a larger size.")
 
@@ -926,16 +1002,26 @@ def render_preview(pattern: pyembroidery.EmbPattern, colors: list[str] | str = "
 # --------------------------------------------------------------------------- orchestrator
 
 
+FORMATS = {
+    "dst": ("Tajima", pyembroidery.write_dst),
+    "pes": ("Brother / Babylock", pyembroidery.write_pes),
+    "jef": ("Janome", pyembroidery.write_jef),
+    "exp": ("Melco / Bernina", pyembroidery.write_exp),
+    "vp3": ("Husqvarna / Pfaff", pyembroidery.write_vp3),
+}
+
+
 @dataclass
 class Result:
     design: Design
     verified: Verified
     dst_path: Path
     preview_path: Path
+    files: dict[str, Path] = field(default_factory=dict)  # every requested format, incl. dst
 
 
 def digitize_to_files(image: np.ndarray, opts: Options, out_dir: Path,
-                      color_hex: str = "#ffffff") -> Result:
+                      color_hex: str = "#ffffff", formats: tuple[str, ...] = ("dst",)) -> Result:
     if opts.colors <= 1 and not opts.thread_colors:
         opts = replace(opts, thread_colors=(color_hex,))
     design = plan_design(image, opts)
@@ -947,10 +1033,16 @@ def digitize_to_files(image: np.ndarray, opts: Options, out_dir: Path,
         raise DigitizeError("Nothing to stitch at this size. Try a larger size.")
 
     dst_path = out_dir / "design.dst"
-    verified = write_and_verify(build_pattern([(b.thread_hex, b.runs) for b in design.blocks]), dst_path)
+    pattern = build_pattern([(b.thread_hex, b.runs) for b in design.blocks])
+    verified = write_and_verify(pattern, dst_path)
     if verified.stitch_count > MAX_STITCHES:
         raise DigitizeError(too_many)
+    files = {"dst": dst_path}
+    for fmt in formats:
+        if fmt != "dst" and fmt in FORMATS:
+            files[fmt] = out_dir / f"design.{fmt}"
+            FORMATS[fmt][1](pattern, str(files[fmt]))
 
     preview_path = out_dir / "preview.png"
     cv2.imwrite(str(preview_path), render_preview(verified.pattern, [b.thread_hex for b in design.blocks]))
-    return Result(design, verified, dst_path, preview_path)
+    return Result(design, verified, dst_path, preview_path, files)
