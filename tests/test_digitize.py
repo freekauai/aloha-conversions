@@ -144,10 +144,27 @@ def test_blank_image_raises(tmp_path):
 
 def test_outline_mode_only_follows_edges(tmp_path):
     fill = run(rectangle_image(), dz.Options(width_mm=100), tmp_path)
-    outline = run(rectangle_image(), dz.Options(width_mm=100, mode="outline"), tmp_path)
+    outline = run(rectangle_image(), dz.Options(width_mm=100, mode="outline", outline_width_mm=0), tmp_path)
     assert outline.verified.stitch_count < fill.verified.stitch_count / 10
-    triple = run(rectangle_image(), dz.Options(width_mm=100, mode="outline", triple_run=True), tmp_path)
+    triple = run(rectangle_image(), dz.Options(width_mm=100, mode="outline", outline_width_mm=0, triple_run=True), tmp_path)
     assert triple.verified.stitch_count > 2.5 * outline.verified.stitch_count
+
+
+def test_outline_solid_is_a_satin_border(tmp_path):
+    solid = run(rectangle_image(), dz.Options(width_mm=100, mode="outline", outline_width_mm=1.5), tmp_path)
+    thin = run(rectangle_image(), dz.Options(width_mm=100, mode="outline", outline_width_mm=0), tmp_path)
+    lengths = [math.dist(a, b) for a, b in stitch_segments(solid.verified.pattern)]
+    across = [l for l in lengths if abs(l - 1.5) < 0.3]
+    assert len(across) > 0.6 * len(lengths)  # zigzags spanning the border width
+    assert solid.verified.stitch_count > 5 * thin.verified.stitch_count
+    # The border is centered on the outline, so the design grows by ~half the width each side.
+    assert abs(solid.verified.width_mm - (100 + 1.5)) <= 0.6
+    # Holes get a border too: the letter B's two counters.
+    b = run(letter_image("B"), dz.Options(width_mm=40, mode="outline", outline_width_mm=1.2), tmp_path)
+    pts = [Point(x, y) for x, y, c in dz.stitch_points(b.verified.pattern) if c == pyembroidery.STITCH]
+    for ring in b.design.shapes[0].interiors:
+        near = dz.Polygon(ring).buffer(0.9).difference(dz.Polygon(ring).buffer(-0.9))
+        assert sum(1 for p in pts if near.covers(p)) > 40
 
 
 def test_stitch_lengths_stay_within_limits(tmp_path):

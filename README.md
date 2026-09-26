@@ -107,6 +107,10 @@ stroke tips; per branch a center-run underlay out and satin back; cross-sections
 capped near the local stroke width so junctions don't spike. Hops between branches
 are walked under the satin, not trimmed.
 
+Outline mode is a solid satin border `outline_width_mm` wide (default 1.5) centered
+on the outline, over a running-stitch underlay; 0 gives the old single running
+stitch (with optional `triple_run`).
+
 Inside tatami fills, hops up to 6 mm that stay inside the shape are walked with
 running stitches instead of trimmed. The design starts at and returns to its center,
 and the DST label carries the design name.

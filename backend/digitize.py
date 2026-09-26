@@ -149,6 +149,7 @@ class Options:
     underlay: str = "contour"  # "none" | "contour" | "full" (contour + sparse cross fill)
     pull_comp_mm: float = 0.0  # grow shapes back out by this much to counter thread pull-in
     satin_max_mm: float = 6.0  # strokes narrower than this get satin instead of tatami; 0 = never
+    outline_width_mm: float = 1.5  # outline mode: satin border this wide; 0 = single running stitch
 
 
 @dataclass
@@ -566,8 +567,25 @@ class StitchPlanner:
 
     # -- per-shape strategies ------------------------------------------------
 
+    def satin_rings(self, rings: list[list[Point]], width: float) -> None:
+        """Outline mode, solid: a satin column centered on each ring, `width`
+        wide, over a running-stitch underlay along the ring. Nearest ring first;
+        each ring starts and ends at the vertex nearest the needle."""
+        rings = list(rings)
+        while rings:
+            here = self.pos
+            ring = min(rings, key=lambda r: min(_dist(v, here) for v in r))
+            rings.remove(ring)
+            line = LineString(closed_from(ring, here))
+            strip = line.buffer(width / 2, cap_style="round", join_style="round")
+            self.region = prep(strip.buffer(TRAVEL_TOLERANCE_MM))
+            self.walk_max = math.inf  # the underlay run is covered by the satin
+            self.path(subdivide(list(line.coords), OUTLINE_STITCH_MM))  # underlay, one lap
+            self.path(satin_mod.zigzag(strip, LineString(line.coords[::-1]), max_width=width))  # satin, back
+            self.walk_max = MAX_TRAVEL_MM
+
     def running_rings(self, rings: list[list[Point]], length: float, triple: bool = False) -> None:
-        """Outline mode: running stitch around each ring, nearest ring first."""
+        """Outline mode, thin: running stitch around each ring, nearest ring first."""
         rings = list(rings)
         while rings:
             here = self.pos
@@ -656,7 +674,8 @@ def _rotate(points: list[Point], deg: float) -> list[Point]:
 
 def plan_stitches(shapes: list[Polygon], mode: str = "fill", triple_run: bool = False,
                   row_spacing: float = FILL_ROW_SPACING_MM, angle_deg: float = 0.0,
-                  underlay: str = "contour", satin_max: float = 0.0) -> list[list[Point]]:
+                  underlay: str = "contour", satin_max: float = 0.0,
+                  outline_width: float = 0.0) -> list[list[Point]]:
     """Stitch runs for the shapes, in order. Narrow shapes (strokes, lettering)
     get satin; areas get tatami, planned on the shape rotated by -angle (so
     rows are horizontal) and rotated back."""
@@ -675,7 +694,9 @@ def plan_stitches(shapes: list[Polygon], mode: str = "fill", triple_run: bool = 
                 continue
         work = affinity.rotate(shape, -angle_deg, origin=(0, 0)) if angle_deg else shape
         planner.region = prep(work.buffer(TRAVEL_TOLERANCE_MM))
-        if mode == "outline":
+        if mode == "outline" and outline_width > 0:
+            planner.satin_rings(rings_of(work), outline_width)
+        elif mode == "outline":
             planner.running_rings(rings_of(work), OUTLINE_STITCH_MM, triple=triple_run)
         else:
             segs = fill_segments(work, row_spacing)
@@ -904,7 +925,7 @@ def plan_design(image: np.ndarray, opts: Options) -> Design:
         if not shapes:
             continue
         runs = plan_stitches(shapes, opts.mode, opts.triple_run, opts.row_spacing_mm, opts.angle_deg,
-                             opts.underlay, opts.satin_max_mm)
+                             opts.underlay, opts.satin_max_mm, opts.outline_width_mm)
         plans.append(BlockPlan(thread, det, area, shapes, runs))
     if not plans:
         raise DigitizeError("Every shape is too small to stitch at this size. Try a larger size.")

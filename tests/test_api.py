@@ -167,7 +167,7 @@ def test_fabric_preset_and_formats_in_digitize(client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["sewing"] == {"row_spacing_mm": 0.40, "angle_deg": 30, "underlay": "full",
-                              "pull_comp_mm": 0.30, "fabric": "fleece", "satin_max_mm": 6.0}
+                              "pull_comp_mm": 0.30, "fabric": "fleece", "satin_max_mm": 6.0, "outline_width_mm": 1.5}
     assert set(body["files_base64"]) == {"dst", "pes", "jef"}
     assert body["threads"]["brother"][0]["name"]
 
